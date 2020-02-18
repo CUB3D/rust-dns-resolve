@@ -2,6 +2,27 @@ use std::net::UdpSocket;
 use byteorder::{ByteOrder, BigEndian, WriteBytesExt};
 
 #[derive(Debug)]
+struct QueryToken {
+    data: String,
+}
+
+impl Default for QueryToken {
+    fn default() -> QueryToken {
+        QueryToken {
+            data: "".to_string()
+        }
+    }
+}
+
+impl QueryToken {
+    fn new(data: &str) -> QueryToken {
+        QueryToken {
+            data: data.to_string()
+        }
+    }
+}
+
+#[derive(Debug)]
 struct QueryHeader {
     identification: u16,
     flags: u16,
@@ -43,23 +64,23 @@ impl Default for QueryQuestion {
 
 #[derive(Debug)]
 struct QueryAnswer {
-    name: String,
+    name: Vec<QueryToken>,
     type_: u16,
     class: u16,
     ttl: u32,
     rd_length: u16,
-    r_data: u8 // Actually an array
+    r_data: Vec<u8>
 }
 
 impl Default for QueryAnswer {
     fn default() -> QueryAnswer {
         QueryAnswer {
-            name: "".to_string(),
+            name: Vec::new(),
             type_: 0,
             class: 0,
             ttl: 0,
             rd_length: 0,
-            r_data: 0
+            r_data: Vec::new()
         }
     }
 }
@@ -77,8 +98,8 @@ impl Default for QueryAuthority {
 struct Query {
     header: QueryHeader,
     questions: Vec<QueryQuestion>,
-    answer: QueryAnswer,
-    authority: QueryAuthority
+    answers: Vec<QueryAnswer>,
+    authorities: Vec<QueryAuthority>
 }
 
 impl Default for Query {
@@ -86,8 +107,26 @@ impl Default for Query {
         Query {
             header: QueryHeader::default(),
             questions: Vec::new(),
-            answer: QueryAnswer::default(),
-            authority: QueryAuthority::default()
+            answers: Vec::new(),
+            authorities: Vec::new()
+        }
+    }
+}
+
+impl Query {
+    fn write(buf: &mut Vec<u8>) {
+        header.write(buf);
+        
+        for question in questions {
+            question.write(buf);
+        }
+
+        for answer in answers {
+            answer.write(buf);
+        }
+
+        for authority in authorities {
+            authority.write(buf);
         }
     }
 }
@@ -130,7 +169,6 @@ fn main() -> std::io::Result<()> {
                 for _label_char_index in 0..label_len {
                     label = format!("{}{}", label, buf[label_pos] as char);
                     label_pos += 1;
-                    println!("label: {}", label);
                 }
             }
             question.name = label;
@@ -158,11 +196,13 @@ fn main() -> std::io::Result<()> {
         //                         Q Op   A T R Ra Z  Rcd 
         response.header.flags = 0b_1_0000_0_0_0_1_000_0000;
 
-        response.answer.name = "googlecom".to_string();
-        response.answer.type_ = query.questions[0].type_;
-        response.answer.class = query.questions[0].class;
-        response.answer.ttl = 100;
-        response.answer.rd_length = 4;
+        response.answers.push(QueryAnswer::default());
+        response.answers[0].name = vec![QueryToken::new("google"), QueryToken::new("com")];
+        response.answers[0].type_ = query.questions[0].type_;
+        response.answers[0].class = query.questions[0].class;
+        response.answers[0].ttl = 100;
+        response.answers[0].rd_length = 4;
+        response.answers[0].r_data = vec![101, 202, 123, 111];
 
 
 
@@ -193,20 +233,17 @@ fn main() -> std::io::Result<()> {
             resp_bytes.write_u16::<BigEndian>(question.class).unwrap();
         }
 
-        for _answer_index in 0..response.header.answer_count {
-            let answer = &response.answer;
+        for answer_index in 0..response.header.answer_count {
+            let answer = &response.answers[answer_index as usize];
 
-            //resp_bytes.write_u8(0).unwrap();
-
-            resp_bytes.write_u8(6 as u8).unwrap();
-            for character in "google".chars() {
-                resp_bytes.write_u8(character as u8).unwrap();
+            for name_token in &answer.name {
+                resp_bytes.write_u8(name_token.data.len() as u8).unwrap();
+                for token_char in name_token.data.chars() {
+                    resp_bytes.write_u8(token_char as u8).unwrap();
+                }
             }
 
-            resp_bytes.write_u8(3 as u8).unwrap();
-            for character in "com".chars() {
-                resp_bytes.write_u8(character as u8).unwrap();
-            }
+            // Send a null terminator
             resp_bytes.write_u8(0).unwrap();
 
             resp_bytes.write_u16::<BigEndian>(answer.type_).unwrap();
@@ -214,10 +251,9 @@ fn main() -> std::io::Result<()> {
             resp_bytes.write_u32::<BigEndian>(answer.ttl).unwrap();
             resp_bytes.write_u16::<BigEndian>(answer.rd_length).unwrap();
 
-            resp_bytes.write_u8(69).unwrap();
-            resp_bytes.write_u8(4).unwrap();
-            resp_bytes.write_u8(20).unwrap();
-            resp_bytes.write_u8(101).unwrap();
+            for octet in &answer.r_data {
+                resp_bytes.write_u8(*octet).unwrap();
+            }
         }
 
         socket.send_to(&resp_bytes[..], &src)?;
