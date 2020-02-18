@@ -1,5 +1,5 @@
 use std::net::UdpSocket;
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{ByteOrder, BigEndian, WriteBytesExt};
 
 #[derive(Debug)]
 struct QueryHeader {
@@ -42,11 +42,25 @@ impl Default for QueryQuestion {
 }
 
 #[derive(Debug)]
-struct QueryAnswer {}
+struct QueryAnswer {
+    name: String,
+    type_: u16,
+    class: u16,
+    ttl: u32,
+    rd_length: u16,
+    r_data: u8 // Actually an array
+}
 
 impl Default for QueryAnswer {
     fn default() -> QueryAnswer {
-        QueryAnswer {}
+        QueryAnswer {
+            name: "".to_string(),
+            type_: 0,
+            class: 0,
+            ttl: 0,
+            rd_length: 0,
+            r_data: 0
+        }
     }
 }
 
@@ -131,12 +145,82 @@ fn main() -> std::io::Result<()> {
         println!("Got query: {:?}", query);
 
 
+
+
         let mut response = Query::default();
+        response.header.identification = query.header.identification;
         response.header.answer_count = 1;
+        response.header.question_count = 1;
+        response.questions.push(QueryQuestion::default());
+        response.questions[0].name = query.questions[0].name.clone();
+        response.questions[0].type_ = query.questions[0].type_;
+        response.questions[0].class = query.questions[0].class;
+        //                         Q Op   A T R Ra Z  Rcd 
+        response.header.flags = 0b_1_0000_0_0_0_1_000_0000;
+
+        response.answer.name = "googlecom".to_string();
+        response.answer.type_ = query.questions[0].type_;
+        response.answer.class = query.questions[0].class;
+        response.answer.ttl = 100;
+        response.answer.rd_length = 4;
 
 
 
-        socket.send_to(&buf, &src)?;
+        let mut resp_bytes: Vec<u8> = Vec::new();
+        resp_bytes.write_u16::<BigEndian>(response.header.identification).unwrap();
+        resp_bytes.write_u16::<BigEndian>(response.header.flags).unwrap();
+        resp_bytes.write_u16::<BigEndian>(response.header.question_count).unwrap();
+        resp_bytes.write_u16::<BigEndian>(response.header.answer_count).unwrap();
+        resp_bytes.write_u16::<BigEndian>(response.header.authority_records_count).unwrap();
+        resp_bytes.write_u16::<BigEndian>(response.header.additional_records_count).unwrap();
+
+        for _question_index in 0..response.header.question_count {
+            let question = &response.questions[_question_index as usize];
+
+            resp_bytes.write_u8(6 as u8).unwrap();
+            for character in "google".chars() {
+                resp_bytes.write_u8(character as u8).unwrap();
+            }
+
+            resp_bytes.write_u8(3 as u8).unwrap();
+            for character in "com".chars() {
+                resp_bytes.write_u8(character as u8).unwrap();
+            }
+
+            resp_bytes.write_u8(0).unwrap();
+
+            resp_bytes.write_u16::<BigEndian>(question.type_).unwrap();
+            resp_bytes.write_u16::<BigEndian>(question.class).unwrap();
+        }
+
+        for _answer_index in 0..response.header.answer_count {
+            let answer = &response.answer;
+
+            //resp_bytes.write_u8(0).unwrap();
+
+            resp_bytes.write_u8(6 as u8).unwrap();
+            for character in "google".chars() {
+                resp_bytes.write_u8(character as u8).unwrap();
+            }
+
+            resp_bytes.write_u8(3 as u8).unwrap();
+            for character in "com".chars() {
+                resp_bytes.write_u8(character as u8).unwrap();
+            }
+            resp_bytes.write_u8(0).unwrap();
+
+            resp_bytes.write_u16::<BigEndian>(answer.type_).unwrap();
+            resp_bytes.write_u16::<BigEndian>(answer.class).unwrap();
+            resp_bytes.write_u32::<BigEndian>(answer.ttl).unwrap();
+            resp_bytes.write_u16::<BigEndian>(answer.rd_length).unwrap();
+
+            resp_bytes.write_u8(69).unwrap();
+            resp_bytes.write_u8(4).unwrap();
+            resp_bytes.write_u8(20).unwrap();
+            resp_bytes.write_u8(101).unwrap();
+        }
+
+        socket.send_to(&resp_bytes[..], &src)?;
         
     } // the socket is closed here
     Ok(())
