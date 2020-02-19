@@ -199,6 +199,89 @@ impl Query {
     }
 }
 
+#[derive(Debug)]
+enum Record {
+    A {addr: [u8; 4]},
+    Invalid
+}
+
+#[derive(Debug)]
+struct CacheNode {
+    label: QueryToken,
+    //record: Record,
+    data: Vec<u8>,
+    children: Vec<CacheNode>
+}
+
+impl CacheNode {
+    fn new(label: QueryToken, data: Vec<u8>) -> CacheNode {
+        CacheNode {
+            label: label,
+            data,
+            children: Vec::new()
+        }
+    }
+
+    fn has_label(&self, needle: &QueryToken) -> bool {
+        for child in &self.children {
+            if child.label.data == needle.data {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn search_by_label(&mut self, needle: &QueryToken) -> Option<&mut CacheNode> {
+        println!("Searching for {:?} in {:?}", needle, self);
+        for child in &mut self.children {
+            if child.label.data == needle.data {
+                return Some(child);
+            }
+        }
+
+        return None;
+    }
+
+    fn search_by_label_stream(&mut self, needle: &Vec<&QueryToken>) -> &mut CacheNode {
+        let mut index = 0;
+        if !self.has_label(&needle[0]) {
+            return self;
+        }
+        let mut current_root = self.search_by_label(&needle[index]).unwrap();
+
+        loop {
+            // Does the current root have the next bit
+            index += 1;
+            if current_root.has_label(&needle[index]) {
+                current_root = current_root.search_by_label(&needle[index]).unwrap();
+            } else {
+                return current_root;
+            }
+        }
+    }
+
+    fn insert(&mut self, name: &QueryToken, data: Vec<u8>) -> &mut CacheNode {
+        let new_node = CacheNode::new(name.clone(), data);
+        self.children.push(new_node);
+        return self.children.last_mut().unwrap();
+    }
+
+    fn update(&mut self, data: &Vec<u8>) {
+        self.data = data.clone();
+    }
+    
+    fn insert_stream(&mut self, name: &Vec<&QueryToken>, data: &Vec<u8>) {
+        // Traverse as deep as possible
+        let mut deepest = self.search_by_label_stream(name);
+        for entry in name {
+            deepest = deepest.insert(entry, Vec::new());
+        }
+        deepest.update(data);
+    }
+}
+
+
+
 fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, usize)> {
     let label_length = buf[start_index];
     println!("Got label length: {}", label_length);
@@ -209,22 +292,14 @@ fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, us
 
     // If the token is compressed
     if label_length & 0b11000000 == 0b11000000 {
-        // Then get the pointer
+        // Then get the pointer to the stream
         let ptr = buf[start_index + 1];
         println!("Got a compressed pointer starting at {}", ptr);
         let (actual_labels, new_pos) = parse_label_stream(buf, ptr as usize); //parse_label(buf, ptr as usize);
 
+            // Return the actual label that the pointer points to, but the index of the octet after the pointer as we need to skip the reference
         return Some((actual_labels, start_index+1));
 
-        
-        /*if let Some((actual_label, end_pos)) = actual_label_resp {
-            // Return the actual label that the pointer points to, but the index of the octet after the pointer as we need to skip the reference
-            println!("Got actual label: {:?}", actual_label);
-            return Some((actual_label, start_index+1));
-        } else {
-            eprintln!("ERROR: Compressed label points to null position");
-            return None;
-        }*/
     } else {
         let mut label_text = "".to_string();
         let mut index = start_index + 1;
@@ -347,8 +422,42 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
     return query;
 }
 
+fn do_stub_resolve(query: &Query, socket: &mut UdpSocket, root_node: &mut CacheNode) {
+
+    // Get the question in the query
+    let question = &query.questions[0];
+    // Try to find the answer in the cache
+    let cached_answer = root_node.search_by_label_stream(&question.name.iter().collect());
+    println!("Found answer {:?} in cache", cached_answer);
+    // Is the answer complete or partial
+    if cached_answer.label.data == query.questions[0].name.last().unwrap().data {
+        println!("Cache hit");
+    } else {
+        println!("Cache miss");
+    }
+
+    // Convert euqery to byte and forward to local resolver
+    let mut req_bytes: Vec<u8> = Vec::new();
+    query.write(&mut req_bytes);
+    socket.send_to(&req_bytes, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 8, 232, 109)), 53)).unwrap();
+
+    // Wait for reply from local resolver
+    let resp_local = socket_read_query(&socket);
+    let mut resp_bytes: Vec<u8> = Vec::new();
+    resp_local.write(&mut resp_bytes);
+
+    // Save local response into the cache
+    let names: Vec<&QueryToken> = resp_local.answers[0].name.iter().rev().collect();
+    root_node.insert_stream(&names, &resp_local.answers[0].r_data);
+    println!("New cache state: {:?}", root_node);
+
+    // Send it back to the original sender
+    socket.send_to(&resp_bytes, query.requester).unwrap();
+}
+
 
 fn main() -> std::io::Result<()> {
+    let mut rootNode = CacheNode::new(QueryToken::new("."), vec![127, 0, 0, 1] );
     {
         println!("Socket create");
         let mut socket = UdpSocket::bind("0.0.0.0:53").expect("Unable to create socket");
@@ -374,12 +483,9 @@ fn main() -> std::io::Result<()> {
         response.answers[0].r_data = vec![101, 202, 123, 111];
 
 
-/*        let mut resp_bytes: Vec<u8> = Vec::new();
-        response.write(&mut resp_bytes);
-        socket.send_to(&resp_bytes[..], &query.requester)?;*/
-
+        do_stub_resolve(&query, &mut socket, &mut rootNode);
         // Forward to local dns
-        let mut req_bytes: Vec<u8> = Vec::new();
+        /*let mut req_bytes: Vec<u8> = Vec::new();
         query.write(&mut req_bytes);
         socket.send_to(&req_bytes, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 20)), 53)).unwrap();
 
@@ -387,7 +493,7 @@ fn main() -> std::io::Result<()> {
         let resp_local = socket_read_query(&socket);
         let mut resp_bytes: Vec<u8> = Vec::new();
         resp_local.write(&mut resp_bytes);
-        socket.send_to(&resp_bytes, query.requester).unwrap();
+        socket.send_to(&resp_bytes, query.requester).unwrap();*/
 
         
     } // the socket is closed here
