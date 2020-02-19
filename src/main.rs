@@ -14,6 +14,12 @@ impl Default for QueryToken {
     }
 }
 
+impl PartialEq for QueryToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.data.to_lowercase() == other.data.to_lowercase()
+    }
+}
+
 impl QueryToken {
     fn new(data: &str) -> QueryToken {
         QueryToken {
@@ -225,7 +231,7 @@ impl CacheNode {
     fn has_label(&self, needle: &QueryToken) -> bool {
         //println!("Checking if {:?} has {:?}",self, needle); 
         for child in &self.children {
-            if child.label.data == needle.data {
+            if child.label == *needle {
                 return true;
             }
         }
@@ -235,7 +241,7 @@ impl CacheNode {
     fn search_by_label(&mut self, needle: &QueryToken) -> Option<&mut CacheNode> {
         //println!("Searching for {:?} in {:?}", needle, self);
         for child in &mut self.children {
-            if child.label.data == needle.data {
+            if child.label == *needle {
                 return Some(child);
             }
         }
@@ -254,7 +260,7 @@ impl CacheNode {
 
         loop {
             // Are we done?
-            if current_root.label.data == needle.last().unwrap().data {
+            if current_root.label == **needle.last().unwrap() {
                 return current_root;
             }
             // Does the current root have the next bit
@@ -383,28 +389,6 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
         answer.name = name_labels;
         label_pos = new_pos;
 
-        /*loop {
-            let mut label = "".to_string();
-            let label_len = buf[label_pos];
-            if label_len & 0b11000000 == 0b11000000 {
-                // This part is a pointer
-                eprintln!("Compressed labels aren't supported");
-            }
-            println!("Got answer label: {}", label_len);
-            label_pos += 1;
-
-            if label_len == 0 {
-                break;
-            }
-
-            for _label_char_index in 0..label_len {
-                label = format!("{}{}", label, buf[label_pos] as char);
-                label_pos += 1;
-            }
-            answer.name.push(QueryToken::new(label.as_str()));
-            
-        }*/
-        //label_pos+=1;//TODO: why is this needed:
         answer.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
         label_pos+=2;
         answer.class = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
@@ -437,8 +421,7 @@ fn do_stub_resolve(query: &Query, socket: &mut UdpSocket, root_node: &mut CacheN
     let cached_answer = root_node.search_by_label_stream(&question.name.iter().rev().collect());
     println!("Found answer {:?} in cache", cached_answer);
     // Is the answer complete or partial
-    println!("HMMM {:?} == {:?}", cached_answer.label.data, query.questions[0].name[0].data);
-    if cached_answer.label.data == query.questions[0].name[0].data {
+    if cached_answer.label == query.questions[0].name[0] {
         println!("Cache hit, replying with cache response");
 
 
@@ -467,10 +450,11 @@ fn do_stub_resolve(query: &Query, socket: &mut UdpSocket, root_node: &mut CacheN
         println!("Cache miss");
     }
 
+
     // Convert euqery to byte and forward to local resolver
     let mut req_bytes: Vec<u8> = Vec::new();
     query.write(&mut req_bytes);
-    socket.send_to(&req_bytes, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 8, 232, 109)), 53)).unwrap();
+    socket.send_to(&req_bytes, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53)).unwrap();
 
     // Wait for reply from local resolver
     let resp_local = socket_read_query(&socket);
