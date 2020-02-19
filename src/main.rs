@@ -199,13 +199,78 @@ impl Query {
     }
 }
 
+fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, usize)> {
+    let label_length = buf[start_index];
+    println!("Got label length: {}", label_length);
+
+    if label_length == 0 {
+        return None;
+    }
+
+    // If the token is compressed
+    if label_length & 0b11000000 == 0b11000000 {
+        // Then get the pointer
+        let ptr = buf[start_index + 1];
+        println!("Got a compressed pointer starting at {}", ptr);
+        let (actual_labels, new_pos) = parse_label_stream(buf, ptr as usize); //parse_label(buf, ptr as usize);
+
+        return Some((actual_labels, start_index+1));
+
+        
+        /*if let Some((actual_label, end_pos)) = actual_label_resp {
+            // Return the actual label that the pointer points to, but the index of the octet after the pointer as we need to skip the reference
+            println!("Got actual label: {:?}", actual_label);
+            return Some((actual_label, start_index+1));
+        } else {
+            eprintln!("ERROR: Compressed label points to null position");
+            return None;
+        }*/
+    } else {
+        let mut label_text = "".to_string();
+        let mut index = start_index + 1;
+        for _x in 0..label_length {
+            label_text = format!("{}{}", label_text, buf[index] as char);
+            index+=1;
+        }
+
+        return Some((vec![QueryToken::new(label_text.as_str())], index));
+    }
+}
+
+fn parse_label_stream(buf: &Vec<u8>, start_index: usize) -> (Vec<QueryToken>, usize) {
+    let mut labels: Vec<QueryToken> = Vec::new();
+    let mut current_index = start_index;
+
+    loop {
+        let possible_label = parse_label(buf, current_index);
+
+        if let Some((next_label, end_pos)) = possible_label {
+            labels.extend(next_label);
+            current_index = end_pos;
+
+            // The label must have been compressed
+            if labels.len() > 1  {
+                current_index += 1;
+                break;
+            }
+        } else {
+            // Exit when we read a token of length 0, and skip the octet
+            current_index += 1;
+            break;
+        }
+    }
+
+    return (labels, current_index);
+
+}
+
 fn socket_read_query(socket: &UdpSocket) -> Query {
     let mut buf = [0; 512];
     println!("recv");
     let (amt, src) = socket.recv_from(&mut buf).expect("No data");
     println!("Got data: {:?}", &buf.to_vec());
 //        println!("Test: {}", String::from_utf8(buf.to_vec()).expect("Not valid"));
-//
+
     let mut query = Query::new(src);
     query.header.identification = BigEndian::read_u16(&buf[0..2]);// (buf[0] << 1 & buf[1]) as u16;
     query.header.flags = BigEndian::read_u16(&buf[2..4]);
@@ -214,42 +279,37 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
     query.header.authority_records_count = BigEndian::read_u16(&buf[8..10]);
     query.header.additional_records_count = BigEndian::read_u16(&buf[10..12]);
 
+
     let mut label_pos = 12;
     for _question_index in 0..query.header.question_count {
         let mut question = QueryQuestion::default();
-        // Read the label
-        loop {
-            let mut label = "".to_string();
-            let label_len = buf[label_pos];
-            label_pos += 1;
-
-            if label_len == 0 {
-                break;
-            }
-
-            for _label_char_index in 0..label_len {
-                label = format!("{}{}", label, buf[label_pos] as char);
-                label_pos += 1;
-            }
-            question.name.push(QueryToken::new(label.as_str()));
-        }
+        let (name_labels, new_pos) = parse_label_stream(&buf.to_vec(), label_pos);
+        label_pos = new_pos;
+        question.name = name_labels;
         question.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
         label_pos += 2;
         question.class = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
         label_pos += 2;
 
         query.questions.push(question);
-//            println!("Test: {}", String::from_utf8(labelBuf.to_vec()).expect("Not valid"));
     }
 
     for _answer_index in 0..query.header.answer_count {
         let mut answer = QueryAnswer::default();
-        loop {
+
+        let (name_labels, new_pos) = parse_label_stream(&buf.to_vec(), label_pos);
+        answer.name = name_labels;
+        label_pos = new_pos;
+
+        /*loop {
             let mut label = "".to_string();
             let label_len = buf[label_pos];
+            if label_len & 0b11000000 == 0b11000000 {
+                // This part is a pointer
+                eprintln!("Compressed labels aren't supported");
+            }
             println!("Got answer label: {}", label_len);
             label_pos += 1;
-            break; //TODO: why does no name get sent with a length of 192
 
             if label_len == 0 {
                 break;
@@ -261,8 +321,8 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
             }
             answer.name.push(QueryToken::new(label.as_str()));
             
-        }
-        label_pos+=1;//TODO: why is this needed:
+        }*/
+        //label_pos+=1;//TODO: why is this needed:
         answer.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
         label_pos+=2;
         answer.class = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
