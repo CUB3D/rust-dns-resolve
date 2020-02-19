@@ -63,7 +63,7 @@ impl QueryHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QueryQuestion {
     name: Vec<QueryToken>,
     type_: u16,
@@ -223,6 +223,7 @@ impl CacheNode {
     }
 
     fn has_label(&self, needle: &QueryToken) -> bool {
+        //println!("Checking if {:?} has {:?}",self, needle); 
         for child in &self.children {
             if child.label.data == needle.data {
                 return true;
@@ -232,7 +233,7 @@ impl CacheNode {
     }
 
     fn search_by_label(&mut self, needle: &QueryToken) -> Option<&mut CacheNode> {
-        println!("Searching for {:?} in {:?}", needle, self);
+        //println!("Searching for {:?} in {:?}", needle, self);
         for child in &mut self.children {
             if child.label.data == needle.data {
                 return Some(child);
@@ -243,13 +244,19 @@ impl CacheNode {
     }
 
     fn search_by_label_stream(&mut self, needle: &Vec<&QueryToken>) -> &mut CacheNode {
+        //println!("Searching {:?} for {:?}", self, needle);
         let mut index = 0;
         if !self.has_label(&needle[0]) {
+            //println!("Dont know label: {:?}", &needle[0]);
             return self;
         }
         let mut current_root = self.search_by_label(&needle[index]).unwrap();
 
         loop {
+            // Are we done?
+            if current_root.label.data == needle.last().unwrap().data {
+                return current_root;
+            }
             // Does the current root have the next bit
             index += 1;
             if current_root.has_label(&needle[index]) {
@@ -284,7 +291,7 @@ impl CacheNode {
 
 fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, usize)> {
     let label_length = buf[start_index];
-    println!("Got label length: {}", label_length);
+//    println!("Got label length: {}", label_length);
 
     if label_length == 0 {
         return None;
@@ -343,7 +350,7 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
     let mut buf = [0; 512];
     println!("recv");
     let (amt, src) = socket.recv_from(&mut buf).expect("No data");
-    println!("Got data: {:?}", &buf.to_vec());
+    //println!("Got data: {:?}", &buf.to_vec());
 //        println!("Test: {}", String::from_utf8(buf.to_vec()).expect("Not valid"));
 
     let mut query = Query::new(src);
@@ -427,11 +434,35 @@ fn do_stub_resolve(query: &Query, socket: &mut UdpSocket, root_node: &mut CacheN
     // Get the question in the query
     let question = &query.questions[0];
     // Try to find the answer in the cache
-    let cached_answer = root_node.search_by_label_stream(&question.name.iter().collect());
+    let cached_answer = root_node.search_by_label_stream(&question.name.iter().rev().collect());
     println!("Found answer {:?} in cache", cached_answer);
     // Is the answer complete or partial
-    if cached_answer.label.data == query.questions[0].name.last().unwrap().data {
-        println!("Cache hit");
+    println!("HMMM {:?} == {:?}", cached_answer.label.data, query.questions[0].name[0].data);
+    if cached_answer.label.data == query.questions[0].name[0].data {
+        println!("Cache hit, replying with cache response");
+
+
+        let mut response = Query::default();
+        response.header.identification = query.header.identification;
+        response.header.answer_count = 1;
+        response.header.question_count = 1;
+        response.questions = query.questions.clone();
+        //                         Q Op   A T R Ra Z  Rcd 
+        response.header.flags = 0b_1_0000_0_0_0_1_000_0000;
+
+        response.answers.push(QueryAnswer::default());
+        response.answers[0].name = query.questions[0].name.clone(); //vec![QueryToken::new("google"), QueryToken::new("com")];
+        response.answers[0].type_ = query.questions[0].type_;
+        response.answers[0].class = query.questions[0].class;
+        response.answers[0].ttl = 100;
+        response.answers[0].rd_length = cached_answer.data.len() as u16;
+        response.answers[0].r_data = cached_answer.data.clone();
+
+        let mut resp_bytes: Vec<u8> = Vec::new();
+        response.write(&mut resp_bytes);
+        socket.send_to(&resp_bytes, query.requester).unwrap();
+        println!("Replied from cache");
+        return;
     } else {
         println!("Cache miss");
     }
@@ -449,7 +480,7 @@ fn do_stub_resolve(query: &Query, socket: &mut UdpSocket, root_node: &mut CacheN
     // Save local response into the cache
     let names: Vec<&QueryToken> = resp_local.answers[0].name.iter().rev().collect();
     root_node.insert_stream(&names, &resp_local.answers[0].r_data);
-    println!("New cache state: {:?}", root_node);
+    //println!("New cache state: {:?}", root_node);
 
     // Send it back to the original sender
     socket.send_to(&resp_bytes, query.requester).unwrap();
@@ -461,6 +492,8 @@ fn main() -> std::io::Result<()> {
     {
         println!("Socket create");
         let mut socket = UdpSocket::bind("0.0.0.0:53").expect("Unable to create socket");
+
+        loop {
         let query = socket_read_query(&socket);
 
         let mut response = Query::default();
@@ -495,7 +528,7 @@ fn main() -> std::io::Result<()> {
         resp_local.write(&mut resp_bytes);
         socket.send_to(&resp_bytes, query.requester).unwrap();*/
 
-        
+        }
     } // the socket is closed here
     Ok(())
 }
