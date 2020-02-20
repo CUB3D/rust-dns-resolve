@@ -36,6 +36,75 @@ impl QueryToken {
 }
 
 #[derive(Debug)]
+enum QueryType {
+    Query = 0,
+    Response = 1
+}
+
+#[derive(Debug)]
+enum QueryOpcodes {
+    Query = 0,
+    InverseQuery = 1,
+    Status = 2,
+}
+
+
+#[derive(Debug)]
+enum QueryResponseCode {
+    NoError = 0,
+    FormatError = 1,
+    ServerFailure = 2,
+    NameError = 3,
+    NotImplemented = 4,
+    Refused = 5
+}
+
+#[derive(Debug)]
+enum ResourceType {
+    A = 1,
+    NS = 2,
+    MD = 3,
+    MF = 4,
+    CNAME = 5,
+    SOA = 6,
+    MB = 7,
+    MG = 8,
+    MR = 9,
+    NULL = 10,
+    WKS = 11,
+    PTR = 12,
+    HINFO = 13,
+    MINFO = 14,
+    MX = 15,
+    TXT = 16
+}
+
+
+#[derive(Debug)]
+enum QuestionType {
+    A = 1,
+    NS = 2,
+    MD = 3,
+    MF = 4,
+    CNAME = 5,
+    SOA = 6,
+    MB = 7,
+    MG = 8,
+    MR = 9,
+    NULL = 10,
+    WKS = 11,
+    PTR = 12,
+    HINFO = 13,
+    MINFO = 14,
+    MX = 15,
+    TXT = 16,
+
+    AXFR = 252,
+    MAILB = 253,
+    MAILA = 254,
+    ALL_RECORDS = 255
+}
+#[derive(Debug)]
 struct QueryHeader {
     identification: u16,
     flags: u16,
@@ -66,6 +135,18 @@ impl QueryHeader {
         buf.write_u16::<BigEndian>(self.answer_count).unwrap();
         buf.write_u16::<BigEndian>(self.authority_records_count).unwrap();
         buf.write_u16::<BigEndian>(self.additional_records_count).unwrap();
+    }
+
+    fn query_type(&self) -> QueryType {
+        match self.flags & 0b1000_0000_0000_0000 {
+            0b0000_0000_0000_0000 => QueryType::Query,
+            0b1000_0000_0000_0000 => QueryType::Response,
+            _ => {
+                eprintln!("Invalid query type: {}", self.flags);
+                QueryType::Query 
+            }
+        }
+
     }
 }
 
@@ -160,7 +241,8 @@ struct Query {
     header: QueryHeader,
     questions: Vec<QueryQuestion>,
     answers: Vec<QueryAnswer>,
-    authorities: Vec<QueryAuthority>,
+    authorities: Vec<QueryAnswer>,
+    additional: Vec<QueryAnswer>,
 
     requester: SocketAddr
 }
@@ -172,7 +254,9 @@ impl Default for Query {
             questions: Vec::new(),
             answers: Vec::new(),
             authorities: Vec::new(),
+            additional: Vec::new(),
             requester: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080)
+
         }
     }
 }
@@ -184,6 +268,7 @@ impl Query {
             questions: Vec::new(),
             answers: Vec::new(),
             authorities: Vec::new(),
+            additional: Vec::new(),
             requester: src
         }
     }
@@ -201,6 +286,10 @@ impl Query {
 
         for authority in &self.authorities {
             authority.write(buf);
+        }
+
+        for additional in &self.additional {
+            additional.write(buf);
         }
     }
 }
@@ -295,9 +384,9 @@ impl CacheNode {
 
 
 
-fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, usize)> {
+fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, usize, bool)> {
     let label_length = buf[start_index];
-//    println!("Got label length: {}", label_length);
+    println!("Got label length: {}", label_length);
 
     if label_length == 0 {
         return None;
@@ -308,10 +397,10 @@ fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, us
         // Then get the pointer to the stream
         let ptr = buf[start_index + 1];
         println!("Got a compressed pointer starting at {}", ptr);
-        let (actual_labels, new_pos) = parse_label_stream(buf, ptr as usize); //parse_label(buf, ptr as usize);
+        let (actual_labels, new_pos, end_of_stream) = parse_label_stream(buf, ptr as usize); //parse_label(buf, ptr as usize);
 
             // Return the actual label that the pointer points to, but the index of the octet after the pointer as we need to skip the reference
-        return Some((actual_labels, start_index+1));
+        return Some((actual_labels, start_index+1, end_of_stream));
 
     } else {
         let mut label_text = "".to_string();
@@ -321,18 +410,19 @@ fn parse_label(buf: &Vec<u8>, start_index: usize) -> Option<(Vec<QueryToken>, us
             index+=1;
         }
 
-        return Some((vec![QueryToken::new(label_text.as_str())], index));
+        return Some((vec![QueryToken::new(label_text.as_str())], index, false));
     }
 }
 
-fn parse_label_stream(buf: &Vec<u8>, start_index: usize) -> (Vec<QueryToken>, usize) {
+// bool for end_of_stream
+fn parse_label_stream(buf: &Vec<u8>, start_index: usize) -> (Vec<QueryToken>, usize, bool) {
     let mut labels: Vec<QueryToken> = Vec::new();
     let mut current_index = start_index;
 
     loop {
         let possible_label = parse_label(buf, current_index);
 
-        if let Some((next_label, end_pos)) = possible_label {
+        if let Some((next_label, end_pos, end_of_stream)) = possible_label {
             labels.extend(next_label);
             current_index = end_pos;
 
@@ -341,19 +431,23 @@ fn parse_label_stream(buf: &Vec<u8>, start_index: usize) -> (Vec<QueryToken>, us
                 current_index += 1;
                 break;
             }
+
+            if end_of_stream {
+                break;
+            }
         } else {
             // Exit when we read a token of length 0, and skip the octet
             current_index += 1;
-            break;
+            return (labels, current_index, true);
         }
     }
 
-    return (labels, current_index);
+    return (labels, current_index, false);
 
 }
 
 fn socket_read_query(socket: &UdpSocket) -> Query {
-    let mut buf = [0; 512];
+    let mut buf = [0; 4096];
     println!("recv");
     let (amt, src) = socket.recv_from(&mut buf).expect("No data");
     //println!("Got data: {:?}", &buf.to_vec());
@@ -367,11 +461,14 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
     query.header.authority_records_count = BigEndian::read_u16(&buf[8..10]);
     query.header.additional_records_count = BigEndian::read_u16(&buf[10..12]);
 
+    println!("Got header {:?}", query.header);
+    println!("Query type: {:?}", query.header.query_type());
+
 
     let mut label_pos = 12;
     for _question_index in 0..query.header.question_count {
         let mut question = QueryQuestion::default();
-        let (name_labels, new_pos) = parse_label_stream(&buf.to_vec(), label_pos);
+        let (name_labels, new_pos, end_of_stream) = parse_label_stream(&buf.to_vec(), label_pos);
         label_pos = new_pos;
         question.name = name_labels;
         question.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
@@ -385,8 +482,7 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
     for _answer_index in 0..query.header.answer_count {
         let mut answer = QueryAnswer::default();
 
-        let (name_labels, new_pos) = parse_label_stream(&buf.to_vec(), label_pos);
-        answer.name = name_labels;
+        let (name_labels, new_pos, end_of_stream) = parse_label_stream(&buf.to_vec(), label_pos);
         label_pos = new_pos;
 
         answer.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
@@ -398,9 +494,6 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
         answer.rd_length = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
         label_pos+=2;
 
-        println!("Answer: {:?}", answer);
-        println!("RD_len: {}", answer.rd_length);
-
         for _rd_index in 0..answer.rd_length {
             answer.r_data.push(buf[label_pos]);
             label_pos+=1;
@@ -408,6 +501,59 @@ fn socket_read_query(socket: &UdpSocket) -> Query {
         query.answers.push(answer);
     }
 
+    println!("Partial query: {:?}", query);
+
+    for _auth_index in 0..query.header.authority_records_count {
+        println!("Parsing answer {}", _auth_index);
+        let mut answer = QueryAnswer::default();
+
+        let (name_labels, new_pos, end_of_stream) = parse_label_stream(&buf.to_vec(), label_pos);
+        answer.name = name_labels;
+        label_pos = new_pos+1;
+
+        answer.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
+        label_pos+=2;
+        answer.class = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
+        label_pos+=2;
+        answer.ttl = BigEndian::read_u32(&buf[label_pos..label_pos+4]);
+        label_pos+=4;
+        answer.rd_length = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
+        label_pos+=2;
+
+        for _rd_index in 0..answer.rd_length {
+            answer.r_data.push(buf[label_pos]);
+            label_pos+=1;
+        }
+
+        println!("Answer: {:?}", answer);
+        query.authorities.push(answer);
+    }
+
+    for _auth_index in 0..query.header.additional_records_count {
+        println!("Parsing additional {}", _auth_index);
+        let mut answer = QueryAnswer::default();
+
+        let (name_labels, new_pos, end_of_stream) = parse_label_stream(&buf.to_vec(), label_pos);
+        answer.name = name_labels;
+        label_pos = new_pos+1;
+
+        answer.type_ = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
+        label_pos+=2;
+        answer.class = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
+        label_pos+=2;
+        answer.ttl = BigEndian::read_u32(&buf[label_pos..label_pos+4]);
+        label_pos+=4;
+        answer.rd_length = BigEndian::read_u16(&buf[label_pos..label_pos+2]);
+        label_pos+=2;
+
+        for _rd_index in 0..answer.rd_length {
+            answer.r_data.push(buf[label_pos]);
+            label_pos+=1;
+        }
+
+        println!("Answer: {:?}", answer);
+        query.additional.push(answer);
+    }
     println!("Got query: {:?}", query);
 
     return query;
@@ -454,16 +600,20 @@ fn do_stub_resolve(query: &Query, socket: &mut UdpSocket, root_node: &mut CacheN
     // Convert euqery to byte and forward to local resolver
     let mut req_bytes: Vec<u8> = Vec::new();
     query.write(&mut req_bytes);
-    socket.send_to(&req_bytes, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53)).unwrap();
+    socket.send_to(&req_bytes, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4)), 53)).unwrap();
 
     // Wait for reply from local resolver
     let resp_local = socket_read_query(&socket);
     let mut resp_bytes: Vec<u8> = Vec::new();
     resp_local.write(&mut resp_bytes);
 
-    // Save local response into the cache
-    let names: Vec<&QueryToken> = resp_local.answers[0].name.iter().rev().collect();
-    root_node.insert_stream(&names, &resp_local.answers[0].r_data);
+    if resp_local.answers.len() > 0 {
+        // Save local response into the cache
+        let names: Vec<&QueryToken> = resp_local.answers[0].name.iter().rev().collect();
+        root_node.insert_stream(&names, &resp_local.answers[0].r_data); 
+    } else {
+        println!("No answer to query available");
+    }
     //println!("New cache state: {:?}", root_node);
 
     // Send it back to the original sender
